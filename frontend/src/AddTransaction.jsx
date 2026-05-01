@@ -12,14 +12,8 @@ export default function AddTransaction({ onAdded }) {
 
   const [loading, setLoading] = useState(false)
 
-  // ✅ FIXED HANDLE CHANGE
   const handleChange = (e) => {
-    const { name, value } = e.target
-
-    setForm((prev) => ({
-      ...prev,
-      [name]: value
-    }))
+    setForm({ ...form, [e.target.name]: e.target.value })
   }
 
   const handleSubmit = async () => {
@@ -46,19 +40,11 @@ export default function AddTransaction({ onAdded }) {
         toast.success(`🔥 Block #${res.data.block_index} mined!`)
       }
 
-      // ✅ RESET FORM
-      setForm({
-        sender: "",
-        receiver: "",
-        amount: ""
-      })
-
-      onAdded && onAdded()
-
-    } catch (err) {
+      setForm({ sender: "", receiver: "", amount: "" })
+      onAdded()
+    } catch {
       toast.dismiss()
       toast.error("Backend error ❌")
-      console.error(err)
     }
 
     setLoading(false)
@@ -75,38 +61,32 @@ export default function AddTransaction({ onAdded }) {
       </h2>
 
       <div className="grid md:grid-cols-3 gap-4">
-
-        {/* SENDER */}
         <input
           name="sender"
           value={form.sender}
           onChange={handleChange}
-          placeholder="e.g. Ministry of Health"
+          placeholder="Sender"
           className="input"
         />
 
-        {/* RECEIVER */}
         <input
           name="receiver"
           value={form.receiver}
           onChange={handleChange}
-          placeholder="e.g. City Hospital"
+          placeholder="Receiver"
           className="input"
         />
 
-        {/* AMOUNT */}
         <input
           name="amount"
           type="number"
           value={form.amount}
           onChange={handleChange}
-          placeholder="e.g. 50000"
+          placeholder="Amount"
           className="input"
         />
-
       </div>
 
-      {/* BUTTON */}
       <motion.button
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
