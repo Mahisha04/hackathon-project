@@ -1,217 +1,77 @@
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional
-import time
+from blockchain import Blockchain
+from fraud_detection import analyze_risk
+from auth import get_password_hash, verify_password, create_access_token, get_current_user
+from database import users_db
+from models import UserRegister, UserLogin, TransactionCreate, Token
 
-from blockchain import Blockchain, Block
-from detector import is_suspicious
-from database import init_db, save_block, load_all_blocks, clear_db
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ── App setup ────────────────────────────────────────────────────
-app = FastAPI(
-    title="Public Fund Tracker API",
-    description="Blockchain-based transparent government fund tracker",
-    version="1.0.0"
-)
+public_ledger = Blockchain()
 
-# Allow React (port 3000) to talk to this backend (port 8000)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# --- AUTO SETUP USERS ---
+def bootstrap_users():
+    default_users = [
+        ("admin", "admin123", "admin"),
+        ("auditor", "auditor123", "auditor"),
+        ("public", "public123", "public"),
+    ]
+    for uname, pwd, role in default_users:
+        if uname not in users_db:
+            users_db[uname] = {"username": uname, "password": get_password_hash(pwd), "role": role}
+    print("✅ System Bootstrap: Default users created.")
 
-# Admin key for protected routes (change this in production!)
-ADMIN_KEY = "hackathon-admin-2025"
+bootstrap_users()
 
-# ── Initialize blockchain and database ───────────────────────────
-init_db()
-blockchain = Blockchain()
+# --- ROLE CHECKER ---
+def role_required(allowed):
+    def checker(user=Depends(get_current_user)):
+        if user["role"] not in allowed:
+            raise HTTPException(status_code=403, detail="Permission Denied")
+        return user
+    return checker
 
-# Load saved blocks from DB into the blockchain on startup
-saved_blocks = load_all_blocks()
-if saved_blocks:
-    # Re-hydrate the blockchain from database
-    blockchain.chain = []
-    for row in saved_blocks:
-        block = Block(
-            index=row["idx"],
-            sender=row["sender"],
-            receiver=row["receiver"],
-            amount=row["amount"],
-            category=row["category"],
-            previous_hash=row["prev_hash"]
-        )
-        block.hash = row["hash"]
-        block.timestamp = row["timestamp"]
-        blockchain.chain.append(block)
-    print(f"Loaded {len(saved_blocks)} blocks from database.")
-else:
-    # Save genesis block to DB
-    save_block({**blockchain.chain[0].to_dict(), "index": 0})
-    print("Started fresh chain with genesis block.")
+@app.post("/login", response_model=Token)
+async def login(user: UserLogin):
+    db_user = users_db.get(user.username)
+    if not db_user or not verify_password(user.password, db_user["password"]):
+        raise HTTPException(status_code=400, detail="Wrong credentials")
+    token = create_access_token({"sub": db_user["username"], "role": db_user["role"]})
+    return {"access_token": token, "token_type": "bearer"}
 
-
-# ── Request / Response Models ─────────────────────────────────────
-class TransactionRequest(BaseModel):
-    sender: str = Field(..., min_length=1, description="Who is sending the funds")
-    receiver: str = Field(..., min_length=1, description="Who is receiving the funds")
-    amount: float = Field(..., gt=0, description="Amount in INR")
-    category: Optional[str] = Field("General", description="Type of expenditure")
-
-
-# ── Helper: get transaction history for anomaly detection ─────────
-def get_amount_history() -> list:
-    chain = blockchain.get_chain()
-    return [b["amount"] for b in chain if b["index"] != 0]  # skip genesis
-
-
-# ── Routes ────────────────────────────────────────────────────────
-
-@app.get("/")
-def root():
-    """Health check endpoint."""
-    return {
-        "status": "running",
-        "project": "Public Fund Tracker",
-        "version": "1.0.0",
-        "docs": "/docs"
-    }
-
+@app.get("/transactions")
+async def get_txs(user=Depends(get_current_user)):
+    return [b.__dict__ for b in public_ledger.chain]
 
 @app.post("/transaction")
-def add_transaction(
-    tx: TransactionRequest,
-    x_api_key: Optional[str] = Header(None)
-):
-    """
-    Add a new transaction to the blockchain.
-    Requires admin API key header: X-Api-Key: hackathon-admin-2025
-    """
-    if x_api_key != ADMIN_KEY:
-        raise HTTPException(
-            status_code=403,
-            detail="Access denied. Admin API key required. Pass header: X-Api-Key"
-        )
+async def add_tx(tx: TransactionCreate, user=Depends(role_required(["admin"]))):
+    risk = analyze_risk(tx.amount, public_ledger.chain)
+    new_block = public_ledger.add_block(tx.sender, tx.receiver, tx.amount, risk)
+    return new_block.__dict__
 
-    # Add to blockchain
-    new_block = blockchain.add_block(
-        sender=tx.sender,
-        receiver=tx.receiver,
-        amount=tx.amount,
-        category=tx.category
-    )
+@app.get("/validate")
+async def validate(user=Depends(get_current_user)):
+    valid = public_ledger.is_chain_valid()
+    return {"status": "VALID" if valid else "TAMPERED", "isValid": valid}
 
-    # Run suspicious detection
-    history = get_amount_history()
-    detection = is_suspicious(tx.amount, history, tx.sender)
+@app.post("/tamper/{index}")
+async def tamper(index: int, amount: float, user=Depends(role_required(["admin"]))):
+    if public_ledger.tamper_block(index, amount):
+        return {"message": "Tampered successfully"}
+    raise HTTPException(status_code=404)
 
-    # Save to database
-    save_block(new_block)
+@app.get("/suspicious")
+async def get_susp(user=Depends(role_required(["admin", "auditor"]))):
+    return [b.__dict__ for b in public_ledger.chain if b.risk_level != "LOW"]
 
-    return {
-        "success": True,
-        "message": "Transaction added to blockchain",
-        "block": new_block,
-        "suspicious_analysis": detection
-    }
+@app.get("/report")
+async def report(user=Depends(role_required(["admin", "auditor"]))):
+    high = len([b for b in public_ledger.chain if b.risk_level == "HIGH"])
+    med = len([b for b in public_ledger.chain if b.risk_level == "MEDIUM"])
+    return {"total": len(public_ledger.chain)-1, "high": high, "med": med, "summary": f"Audit: {high+med} issues found."}
 
-
-@app.get("/chain")
-def get_chain():
-    """
-    Get the full blockchain with suspicious flags on each block.
-    Public endpoint — no auth required.
-    """
-    chain = blockchain.get_chain()
-    history = get_amount_history()
-
-    # Annotate each block with suspicious analysis
-    annotated = []
-    for block in chain:
-        if block["index"] == 0:
-            block["suspicious_analysis"] = {"flagged": False, "reasons": [], "risk_level": "low"}
-        else:
-            block["suspicious_analysis"] = is_suspicious(
-                block["amount"],
-                [b["amount"] for b in chain[:block["index"]] if b["index"] != 0],
-                block["sender"]
-            )
-        annotated.append(block)
-
-    return {
-        "chain": annotated,
-        "length": len(chain)
-    }
-
-
-@app.get("/verify")
-def verify_chain():
-    """
-    Verify the entire blockchain's integrity.
-    Public endpoint — anyone can verify the chain.
-    """
-    result = blockchain.verify_integrity()
-    return result
-
-
-@app.get("/stats")
-def get_stats():
-    """
-    Analytics: summary statistics of all transactions.
-    """
-    return blockchain.get_stats()
-
-
-@app.get("/search")
-def search_transactions(q: str = "", category: str = ""):
-    """
-    Search transactions by sender, receiver, or category.
-    Example: /search?q=health or /search?category=Roads
-    """
-    chain = blockchain.get_chain()[1:]  # skip genesis
-
-    results = []
-    for block in chain:
-        q_lower = q.lower()
-        matches_q = (
-            q_lower in block["sender"].lower() or
-            q_lower in block["receiver"].lower() or
-            q_lower == str(int(block["amount"]))
-        ) if q else True
-
-        matches_cat = (
-            category.lower() in block["category"].lower()
-        ) if category else True
-
-        if matches_q and matches_cat:
-            results.append(block)
-
-    return {
-        "results": results,
-        "count": len(results),
-        "query": q,
-        "category_filter": category
-    }
-
-
-@app.delete("/reset")
-def reset_chain(x_api_key: Optional[str] = Header(None)):
-    """
-    DANGER: Wipes the entire chain and starts fresh.
-    Admin only — use only for demos/testing.
-    """
-    if x_api_key != ADMIN_KEY:
-        raise HTTPException(status_code=403, detail="Admin access required")
-
-    global blockchain
-    clear_db()
-    blockchain = Blockchain()
-    save_block({**blockchain.chain[0].to_dict(), "index": 0})
-
-    return {"success": True, "message": "Chain reset. Genesis block created."}
-
-
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
