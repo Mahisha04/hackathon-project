@@ -1,0 +1,28 @@
+{
+  "name": "hackathon-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mahisha04/hackathon-project.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Mahisha04/hackathon-project/issues"
+  },
+  "homepage": "https://github.com/Mahisha04/hackathon-project#readme",
+  "devDependencies": {
+    "autoprefixer": "^10.5.0",
+    "init": "^0.1.2",
+    "npx": "^10.2.2",
+    "postcss": "^8.5.13",
+    "tailwindcss": "^3.4.1"
+  }
+}
